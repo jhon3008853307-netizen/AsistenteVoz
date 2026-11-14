@@ -1,0 +1,220 @@
+name: Sira Apple Completo - Amor y 2 Aplausos
+on: [workflow_dispatch, push]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Configurar Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Instalar XcodeGen
+        run: brew install xcodegen
+
+      - name: Crear proyecto, permisos y código Swift en un solo paso
+        run: |
+          mkdir -p SiraAppleApp/Sources
+
+          cat > project.yml <<'EOF'
+          name: SiraAppleApp
+          options:
+            bundleIdPrefix: com.sira.apple
+          targets:
+            SiraAppleApp:
+              type: application
+              platform: iOS
+              deploymentTarget: "18.0"
+              sources: [SiraAppleApp/Sources]
+              settings:
+                base:
+                  PRODUCT_BUNDLE_IDENTIFIER: com.sira.apple.assistant
+                  INFOPLIST_FILE: SiraAppleApp/Info.plist
+                  CODE_SIGN_ENTITLEMENTS: SiraAppleApp/SiraAppleApp.entitlements
+          EOF
+
+          cat > SiraAppleApp/Info.plist <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://apple.com">
+          <plist version="1.0">
+          <dict>
+            <key>NSSiriUsageDescription</key>
+            <string>Permite controlar toda la aplicación mediante Siri y comandos de amor.</string>
+            <key>NSMicrophoneUsageDescription</key>
+            <string>Escucha continuamente para detectar los dos aplausos y tu voz.</string>
+            <key>NSSpeechRecognitionUsageDescription</key>
+            <string>Reconoce palabras clave relacionadas con el amor sin necesidad de internet.</string>
+            <key>NSContactsUsageDescription</key>
+            <string>Accede a tus contactos para llamadas y mensajes rápidos.</string>
+            <key>NSCalendarsFullAccessUsageDescription</key>
+            <string>Gestiona tus eventos y recordatorios importantes.</string>
+            <key>NSLocationWhenInUseUsageDescription</key>
+            <string>Brinda contexto de ubicación en tiempo real.</string>
+            <key>NSHomeKitUsageDescription</key>
+            <string>Controla luces, cerraduras y escenas de tu hogar inteligente.</string>
+            <key>NSSupportsLiveActivities</key>
+            <true/>
+            <key>UIBackgroundModes</key>
+            <array>
+              <string>audio</string>
+              <string>processing</string>
+            </array>
+          </dict>
+          </plist>
+          EOF
+
+          cat > SiraAppleApp/SiraAppleApp.entitlements <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://apple.com">
+          <plist version="1.0">
+          <dict>
+            <key>com.apple.developer.siri</key>
+            <true/>
+            <key>com.apple.developer.homekit</key>
+            <true/>
+          </dict>
+          </plist>
+          EOF
+
+          cat > SiraAppleApp/Sources/SiraCore.swift <<'EOF'
+          import SwiftUI
+          import AVFoundation
+          import Speech
+          import SoundAnalysis
+          import ActivityKit
+          import AppIntents
+
+          struct SiraIslaAttributes: ActivityAttributes {
+              public struct ContentState: Codable, Hashable {
+                  var estado: String
+                  var motivoActivacion: String
+              }
+          }
+
+          struct ActivarPorAmorIntent: AppIntent {
+              static var title: LocalizedStringResource = "Activar Sira con Amor"
+              static var description = IntentDescription("Enciende todas las dinámicas de Apple al decir amor.")
+
+              func perform() async throws -> some IntentResult & ProvidesDialog {
+                  await MainActor.run {
+                      MotorSira.shared.activarDinamicaTotal(motivo: "Comando de Amor ❤️")
+                  }
+                  return .result(dialog: "Aquí estoy, activada con amor y lista para ayudarte.")
+              }
+          }
+
+          class MotorSira: NSObject, ObservableObject, SNResultsObserving {
+              static let shared = MotorSira()
+              
+              @Published var estaActiva: Bool = false
+              @Published var motivoActual: String = "Esperando 2 aplausos o la palabra Amor..."
+              @Published var nivelAudio: CGFloat = 0.0
+              
+              private let audioEngine = AVAudioEngine()
+              private var streamAnalyzer: SNAudioStreamAnalyzer?
+              private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "es-ES"))
+              private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
+              private var recognitionTask: SFSpeechRecognitionTask?
+              private var tiemposAplausos: [Date] = []
+              
+              func iniciarEscuchaContinua() {
+                  SFSpeechRecognizer.requestAuthorization { _ in }
+                  AVAudioApplication.requestRecordPermission { permitido in
+                      if permitido {
+                          DispatchQueue.main.async {
+                              self.configurarMotorDeAudio()
+                          }
+                      }
+                  }
+              }
+              
+              private func configurarMotorDeAudio() {
+                  let inputNode = audioEngine.inputNode
+                  let formato = inputNode.outputFormat(forBus: 0)
+                  
+                  streamAnalyzer = SNAudioStreamAnalyzer(format: formato)
+                  if let request = try? SNClassifySoundRequest(classifierIdentifier: .version1) {
+                      try? streamAnalyzer?.add(request, withObserver: self)
+                  }
+                  
+                  recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
+                  recognitionRequest?.requiresOnDeviceRecognition = true
+                  
+                  recognitionTask = speechRecognizer?.recognitionTask(with: recognitionRequest!) { [weak self] result, _ in
+                      guard let self = self, let texto = result?.bestTranscription.formattedString.lowercased() else { return }
+                      
+                      if texto.contains("amor") || texto.contains("te amo") || texto.contains("mi amor") {
+                          DispatchQueue.main.async {
+                              self.activarDinamicaTotal(motivo: "Activada por Amor ❤️")
+                          }
+                      }
+                  }
+                  
+                  inputNode.installTap(onBus: 0, bufferSize: 1024, format: formato) { [weak self] buffer, time in
+                      self?.streamAnalyzer?.analyze(buffer, atAudioFramePosition: time.sampleTime)
+                      self?.recognitionRequest?.append(buffer)
+                      self?.calcularVolumenParaBrillo(buffer: buffer)
+                  }
+                  
+                  try? audioEngine.start()
+              }
+              
+              func request(_ request: SNRequest, didProduce result: SNResult) {
+                  guard let classificationResult = result as? SNClassificationResult,
+                        let topClassification = classificationResult.classifications.first else { return }
+                  
+                  if (topClassification.identifier.contains("applause") || topClassification.identifier.contains("clap")) && topClassification.confidence > 0.75 {
+                      registrarAplauso()
+                  }
+              }
+              
+              private func registrarAplauso() {
+                  let ahora = Date()
+                  tiemposAplausos = tiemposAplausos.filter { ahora.timeIntervalSince($0) < 2.0 }
+                  tiemposAplausos.append(ahora)
+                  
+                  if tiemposAplausos.count >= 2 {
+                      tiemposAplausos.removeAll()
+                      DispatchQueue.main.async {
+                          self.activarDinamicaTotal(motivo: "Activada por 2 Aplausos 👏👏")
+                      }
+                  }
+              }
+              
+              private func calcularVolumenParaBrillo(buffer: AVAudioPCMBuffer) {
+                  guard let channelData = buffer.floatChannelData? else { return }
+                  let frames = Int(buffer.frameLength)
+                  var suma: Float = 0
+                  for i in 0..<frames { suma += abs(channelData[i]) }
+                  let promedio = CGFloat(suma / Float(frames))
+                  
+                  DispatchQueue.main.async {
+                      self.nivelAudio = min(max(promedio * 15, 0.1), 1.0)
+                  }
+              }
+              
+              func activarDinamicaTotal(motivo: String) {
+                  self.estaActiva = true
+                  self.motivoActual = motivo
+                  
+                  let generador = UINotificationFeedbackGenerator()
+                  generador.notificationOccurred(.success)
+                  
+                  let atributos = SiraIslaAttributes()
+                  let estado = SiraIslaAttributes.ContentState(estado: "Escuchando", motivoActivacion: motivo)
+                  _ = try? Activity<SiraIslaAttributes>.request(
+                      attributes: atributos,
+                      content: .init(state: estado, staleDate: nil)
+                  )
+                  
+                  let sintetizador = AVSpeechSynthesizer()
+                  let frase = AVSpeechUtterance(string: "Aquí estoy. \(motivo). ¿En qué te ayudo?")
+                  frase.voice = AVSpeechSynthesisVoice(language: "es-MX")
+                  sintetizador.speak(frase)
+              }
+          }
+
+          struct ContentView: View {
+              @StateObject private var motor = MotorSira.shared
+              
